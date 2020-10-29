@@ -171,7 +171,7 @@ configure(subprojects.findAll { !sourceless.contains(it.name) }) {
     // Configure options for all Kotlin compilation tasks
     tasks.withType(AbstractKotlinCompile).all {
         kotlinOptions.freeCompilerArgs += OptInPreset.optInAnnotations.collect { "-Xopt-in=" + it }
-        kotlinOptions.freeCompilerArgs += "-progressive"
+        //kotlinOptions.freeCompilerArgs += "-progressive"
         // Disable KT-36770 for RxJava2 integration
         kotlinOptions.freeCompilerArgs += "-XXLanguage:-ProhibitUsingNullableTypeParameterAgainstNotNullAnnotated"
         // Remove null assertions to get smaller bytecode on Android
