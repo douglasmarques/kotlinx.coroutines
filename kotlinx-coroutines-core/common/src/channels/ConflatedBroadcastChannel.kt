@@ -177,7 +177,13 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
         return this
     }
 
-    private inner class Subscriber : ConflatedBufferedChannel<E>(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST, onUndeliveredElement = null), ReceiveChannel<E> {
+    private inner class Subscriber :
+        ConflatedBufferedChannel<E>(
+            capacity = 1,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            onUndeliveredElement = null
+        ),
+        ReceiveChannel<E> {
         override fun onCancel(wasClosed: Boolean) {
             if (wasClosed) closeSubscriber(this)
         }

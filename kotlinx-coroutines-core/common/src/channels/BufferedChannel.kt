@@ -146,6 +146,14 @@ internal open class BufferedChannel<E>(
         invokeOnCancellation { segment.onCancellation(i, onUndeliveredElement, context, this) }
     }
 
+    protected fun shouldSendSuspend(): Boolean {
+        val sendersAndCloseStatusCur = sendersAndCloseStatus.value
+        val closed = sendersAndCloseStatusCur.isClosedForSend0
+        if (closed) return true
+        val s = sendersAndCloseStatusCur.counter
+        return unlimited || s < bufferEnd.value || s < receivers.value
+    }
+
     private inline fun <W, R> sendImpl(
         element: E,
         waiter: W,
@@ -356,6 +364,7 @@ internal open class BufferedChannel<E>(
     override suspend fun receive(): E = receiveImpl(
         waiter = null,
         onRendezvous = { element ->
+            onReceiveSynchronizationCompletion()
             return element
         },
         onSuspend = { _, _ -> error("unexpected") },
@@ -368,7 +377,7 @@ internal open class BufferedChannel<E>(
     )
 
     private fun onClosedReceive(): E =
-        throw recoverStackTrace(receiveException(getCause()))
+        throw recoverStackTrace(receiveException(getCause())).also { onReceiveSynchronizationCompletion() }
 
     private suspend fun receiveOnNoWaiterSuspend(
         segm: ChannelSegment<E>,
@@ -379,18 +388,21 @@ internal open class BufferedChannel<E>(
             segm, i, r,
             waiter = cont,
             onRendezvous = { element ->
+                onReceiveSynchronizationCompletion()
                 cont.resume(element) {
                     onUndeliveredElement?.callUndeliveredElement(element, cont.context)
                 }
             },
             onSuspend = { segm, i ->
-                onReceiveEnqueued();
+                onReceiveEnqueued()
+                onReceiveSynchronizationCompletion()
                 cont.invokeOnCancellation {
                     segm.onCancellation(i);
                     onReceiveDequeued()
                 }
             },
             onClosed = {
+                onReceiveSynchronizationCompletion()
                 cont.resumeWithException(receiveException(getCause()))
             },
         )
@@ -398,14 +410,14 @@ internal open class BufferedChannel<E>(
 
     override suspend fun receiveCatching(): ChannelResult<E> = receiveImpl(
         waiter = null,
-        onRendezvous = { element -> success(element) },
+        onRendezvous = { element -> onReceiveSynchronizationCompletion(); success(element) },
         onSuspend = { _, _ -> error("unexcepted") },
         onClosed = { onClosedReceiveCatching() },
         onNoWaiter = { segm, i, r -> receiveCatchingOnNoWaiterSuspend(segm, i, r) }
     )
 
     private fun onClosedReceiveCatching(): ChannelResult<E> =
-        closed(getCause())
+        closed<E>(getCause()).also { onReceiveSynchronizationCompletion() }
 
     private suspend fun receiveCatchingOnNoWaiterSuspend(
         segm: ChannelSegment<E>,
@@ -417,24 +429,30 @@ internal open class BufferedChannel<E>(
             segm, i, r,
             waiter = waiter,
             onRendezvous = { element ->
+                onReceiveSynchronizationCompletion()
                 cont.resume(success(element)) {
                     onUndeliveredElement?.callUndeliveredElement(element, cont.context)
                 }
             },
             onSuspend = { segm, i ->
-                onReceiveEnqueued();
+                onReceiveEnqueued()
+                onReceiveSynchronizationCompletion()
                 cont.invokeOnCancellation {
                     segm.onCancellation(i);
                     onReceiveDequeued()
                 }
             },
             onClosed = {
+                onReceiveSynchronizationCompletion()
                 cont.resume(closed(getCause()))
             },
         )
     }
 
-    override fun tryReceive(): ChannelResult<E> {
+    override fun tryReceive(): ChannelResult<E> =
+        tryReceiveInternal().also { onReceiveSynchronizationCompletion() }
+
+    protected fun tryReceiveInternal(): ChannelResult<E> {
         // Read `receivers` counter first.
         val r = receivers.value
         val sendersAndCloseStatusCur = sendersAndCloseStatus.value
@@ -798,21 +816,22 @@ internal open class BufferedChannel<E>(
         receiveImpl(
             waiter = select,
             onRendezvous = { elem ->
-                onRegisterSelectXXX()
+                onReceiveSynchronizationCompletion()
                 select.selectInRegistrationPhase(elem)
            },
             onSuspend = { segm, i ->
                 onReceiveEnqueued()
+                onReceiveSynchronizationCompletion()
                 select.disposeOnCompletion { segm.onCancellation(i) }
             },
             onClosed = {
-                onRegisterSelectXXX();
+                onReceiveSynchronizationCompletion();
                 select.selectInRegistrationPhase(CHANNEL_CLOSED)
             }
         )
     }
 
-    protected open fun onRegisterSelectXXX() {}
+    protected open fun onReceiveSynchronizationCompletion() {}
 
     private fun processResultSelectSend(ignoredParam: Any?, selectResult: Any?): Any? =
         if (selectResult === CHANNEL_CLOSED) throw sendException(getCause())
@@ -1104,13 +1123,11 @@ internal open class BufferedChannel<E>(
             onReceiveDequeued()
         }
 
-        protected open fun onHasNextFinishedWithoutEnqueueing() {}
-
         override suspend fun hasNext(): Boolean = receiveImpl(
             waiter = null,
             onRendezvous = { element ->
                 this.receiveResult = element.elementAsState()
-                onHasNextFinishedWithoutEnqueueing()
+                onReceiveSynchronizationCompletion()
                 true
             },
             onSuspend = { _, _ -> error("unreachable") },
@@ -1120,8 +1137,8 @@ internal open class BufferedChannel<E>(
 
         private fun onCloseHasNext(): Boolean {
             val cause = getCause()
+            onReceiveSynchronizationCompletion()
             this.receiveResult = ClosedChannel(cause)
-            onHasNextFinishedWithoutEnqueueing()
             if (cause == null) return false
             else throw recoverStackTrace(cause)
         }
@@ -1138,7 +1155,7 @@ internal open class BufferedChannel<E>(
                 onRendezvous = { element ->
                     this.receiveResult = element
                     this.cont = null
-                    onHasNextFinishedWithoutEnqueueing()
+                    onReceiveSynchronizationCompletion()
                     cont.resume(true) {
                         onUndeliveredElement?.callUndeliveredElement(element, cont.context)
                     }
@@ -1148,12 +1165,13 @@ internal open class BufferedChannel<E>(
                     this.i = i
                     cont.invokeOnCancellation(this.asHandler)
                     onReceiveEnqueued()
+                    onReceiveSynchronizationCompletion()
                 },
                 onClosed = {
                     this.cont = null
                     val cause = getCause()
                     this.receiveResult = ClosedChannel(cause)
-                    onHasNextFinishedWithoutEnqueueing()
+                    onReceiveSynchronizationCompletion()
                     if (cause == null) {
                         cont.resume(false)
                     } else {
