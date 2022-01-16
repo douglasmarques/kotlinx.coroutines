@@ -197,7 +197,7 @@ public class SelectClause2Impl<P, Q>(
  * @suppress **This is unstable API, and it is subject to change.**
  */
 @InternalCoroutinesApi // todo: sealed interface https://youtrack.jetbrains.com/issue/KT-22286
-public interface SelectInstance<in R> {
+public interface SelectInstance<in R> : Waiter {
     /**
      * The context of the coroutine that is performing this `select` operation.
      */

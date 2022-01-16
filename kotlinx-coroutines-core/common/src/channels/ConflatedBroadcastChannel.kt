@@ -7,9 +7,8 @@ package kotlinx.coroutines.channels
 import kotlinx.atomicfu.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.internal.*
-import kotlinx.coroutines.intrinsics.*
 import kotlinx.coroutines.selects.*
-import kotlin.jvm.*
+import kotlin.native.concurrent.*
 
 /**
  * Broadcasts the most recently sent element (aka [value]) to all [openSubscription] subscribers.
@@ -22,9 +21,8 @@ import kotlin.jvm.*
  * A secondary constructor can be used to create an instance of this class that already holds a value.
  * This channel is also created by `BroadcastChannel(Channel.CONFLATED)` factory function invocation.
  *
- * This implementation is fully lock-free. In this implementation
- * [opening][openSubscription] and [closing][ReceiveChannel.cancel] subscription takes O(N) time, where N is the
- * number of subscribers.
+ * In this implementation, [opening][openSubscription] and [closing][ReceiveChannel.cancel] subscription
+ * takes linear time in the number of subscribers.
  *
  * **Note: This API is obsolete since 1.5.0.** It will be deprecated with warning in 1.6.0
  * and with error in 1.7.0. It is replaced with [StateFlow][kotlinx.coroutines.flow.StateFlow].
@@ -38,29 +36,20 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
      * immediately sending an element: `ConflatedBroadcastChannel().apply { offer(value) }`.
      */
     public constructor(value: E) : this() {
-        _state.lazySet(State<E>(value, null))
+        _lastElement = value
     }
 
-    private val _state = atomic<Any>(INITIAL_STATE) // State | Closed
-    private val _updating = atomic(0)
-    // State transitions: null -> handler -> HANDLER_INVOKED
-    private val onCloseHandler = atomic<Any?>(null)
+    /**
+     * All operation are protected by this lock.
+     */
+    private val _lock = ReentrantLock()
 
-    private companion object {
-        private val CLOSED = Closed(null)
-        private val UNDEFINED = Symbol("UNDEFINED")
-        private val INITIAL_STATE = State<Any?>(UNDEFINED, null)
-    }
+    private val _subscribers = atomic<List<ConflatedBufferedChannel<E>>>(emptyList())
+    private var _lastElement: Any? = NO_ELEMENT
 
-    private class State<E>(
-        @JvmField val value: Any?, // UNDEFINED | E
-        @JvmField val subscribers: Array<Subscriber<E>>?
-    )
-
-    private class Closed(@JvmField val closeCause: Throwable?) {
-        val sendException: Throwable get() = closeCause ?: ClosedSendChannelException(DEFAULT_CLOSE_MESSAGE)
-        val valueException: Throwable get() = closeCause ?: IllegalStateException(DEFAULT_CLOSE_MESSAGE)
-    }
+    private var _isClosed = false
+    private var _closeCause: Throwable? = null
+    private var _onCloseHandler: Handler? = null
 
     /**
      * The most recently sent element to this channel.
@@ -70,16 +59,13 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
      * It throws the original [close][SendChannel.close] cause exception if the channel has _failed_.
      */
     @Suppress("UNCHECKED_CAST")
-    public val value: E get() {
-        _state.loop { state ->
-            when (state) {
-                is Closed -> throw state.valueException
-                is State<*> -> {
-                    if (state.value === UNDEFINED) throw IllegalStateException("No value")
-                    return state.value as E
-                }
-                else -> error("Invalid state $state")
-            }
+    public val value: E get() = _lock.withLock {
+        if (_isClosed) {
+            throw _closeCause ?: IllegalStateException("This broadcast channel is closed")
+        }
+        _lastElement.let {
+            if (it !== NO_ELEMENT) it as E
+            else error("No value")
         }
     }
 
@@ -87,116 +73,47 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
      * The most recently sent element to this channel or `null` when this class is constructed without
      * initial value and no value was sent yet or if it was [closed][close].
      */
-    public val valueOrNull: E? get() = when (val state = _state.value) {
-        is Closed -> null
-        is State<*> -> UNDEFINED.unbox(state.value)
-        else -> error("Invalid state $state")
+    public val valueOrNull: E? get() = _lock.withLock {
+        if (_isClosed) null
+        else if (_lastElement === NO_ELEMENT) null
+        else _lastElement as E
     }
 
-    public override val isClosedForSend: Boolean get() = _state.value is Closed
+    public override val isClosedForSend: Boolean get() = _lock.withLock { _isClosed }
 
     @Suppress("UNCHECKED_CAST")
-    public override fun openSubscription(): ReceiveChannel<E> {
-        val subscriber = Subscriber(this)
-        _state.loop { state ->
-            when (state) {
-                is Closed -> {
-                    subscriber.close(state.closeCause)
-                    return subscriber
-                }
-                is State<*> -> {
-                    if (state.value !== UNDEFINED)
-                        subscriber.offerInternal(state.value as E)
-                    val update = State(state.value, addSubscriber((state as State<E>).subscribers, subscriber))
-                    if (_state.compareAndSet(state, update))
-                        return subscriber
-                }
-                else -> error("Invalid state $state")
-            }
+    public override fun openSubscription(): ReceiveChannel<E> = _lock.withLock {
+        val subscriber = Subscriber()
+        _lastElement.let {
+            if (it !== NO_ELEMENT) subscriber.trySend(it as E)
         }
+        _subscribers.update { it + subscriber }
+        subscriber
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun closeSubscriber(subscriber: Subscriber<E>) {
-        _state.loop { state ->
-            when (state) {
-                is Closed -> return
-                is State<*> -> {
-                    val update = State(state.value, removeSubscriber((state as State<E>).subscribers!!, subscriber))
-                    if (_state.compareAndSet(state, update))
-                        return
-                }
-                else -> error("Invalid state $state")
-            }
-        }
-    }
-
-    private fun addSubscriber(list: Array<Subscriber<E>>?, subscriber: Subscriber<E>): Array<Subscriber<E>> {
-        if (list == null) return Array(1) { subscriber }
-        return list + subscriber
+    private fun closeSubscriber(subscriber: Subscriber) = _subscribers.update {
+        check(subscriber in it) { "The removing subscriber does not exist" }
+        it - subscriber
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun removeSubscriber(list: Array<Subscriber<E>>, subscriber: Subscriber<E>): Array<Subscriber<E>>? {
-        val n = list.size
-        val i = list.indexOf(subscriber)
-        assert { i >= 0 }
-        if (n == 1) return null
-        val update = arrayOfNulls<Subscriber<E>>(n - 1)
-        list.copyInto(
-            destination = update,
-            endIndex = i
-        )
-        list.copyInto(
-            destination = update,
-            destinationOffset = i,
-            startIndex = i + 1
-        )
-        return update as Array<Subscriber<E>>
+    public override fun close(cause: Throwable?): Boolean = _lock.withLock {
+        if (_isClosed) return@withLock false
+        _isClosed = true
+        _subscribers.value.forEach { it.close(cause) }
+        _subscribers.value = emptyList()
+        _onCloseHandler?.invoke(cause)
+        return@withLock true
     }
 
-    @Suppress("UNCHECKED_CAST")
-    public override fun close(cause: Throwable?): Boolean {
-        _state.loop { state ->
-            when (state) {
-                is Closed -> return false
-                is State<*> -> {
-                    val update = if (cause == null) CLOSED else Closed(cause)
-                    if (_state.compareAndSet(state, update)) {
-                        (state as State<E>).subscribers?.forEach { it.close(cause) }
-                        invokeOnCloseHandler(cause)
-                        return true
-                    }
-                }
-                else -> error("Invalid state $state")
-            }
+    override fun invokeOnClose(handler: Handler): Unit = _lock.withLock {
+        if (_onCloseHandler !== null) {
+            if (_isClosed) error("Another handler has already registered and successfully invoked: $_onCloseHandler")
+            else error("Another handler has already registered: $_onCloseHandler")
         }
-    }
-
-    private fun invokeOnCloseHandler(cause: Throwable?) {
-        val handler = onCloseHandler.value
-        if (handler !== null && handler !== HANDLER_INVOKED
-            && onCloseHandler.compareAndSet(handler, HANDLER_INVOKED)) {
-            @Suppress("UNCHECKED_CAST")
-            (handler as Handler)(cause)
-        }
-    }
-
-    override fun invokeOnClose(handler: Handler) {
-        // Intricate dance for concurrent invokeOnClose and close
-        if (!onCloseHandler.compareAndSet(null, handler)) {
-            val value = onCloseHandler.value
-            if (value === HANDLER_INVOKED) {
-                throw IllegalStateException("Another handler was already registered and successfully invoked")
-            } else {
-                throw IllegalStateException("Another handler was already registered: $value")
-            }
-        } else {
-            val state = _state.value
-            if (state is Closed && onCloseHandler.compareAndSet(handler, HANDLER_INVOKED)) {
-                (handler)(state.closeCause)
-            }
-        }
+        _onCloseHandler = handler
+        if (_isClosed) handler.invoke(_closeCause)
     }
 
     /**
@@ -222,8 +139,10 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
      * future subscribers. This implementation never suspends.
      * It throws exception if the channel [isClosedForSend] (see [close] for details).
      */
-    public override suspend fun send(element: E) {
-        offerInternal(element)?.let { throw it.sendException }
+    public override suspend fun send(element: E): Unit = _lock.withLock {
+        if (_isClosed) throw _closeCause ?: ClosedSendChannelException(DEFAULT_CLOSE_MESSAGE)
+        _lastElement = element
+        _subscribers.value.forEach { it.trySend(element) }
     }
 
     /**
@@ -231,39 +150,13 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
      * future subscribers. This implementation always returns either successful result
      * or closed with an exception.
      */
-    public override fun trySend(element: E): ChannelResult<Unit> {
-        offerInternal(element)?.let { return ChannelResult.closed(it.sendException)  }
-        return ChannelResult.success(Unit)
+    public override fun trySend(element: E): ChannelResult<Unit> = _lock.withLock {
+        if (_isClosed) return@withLock ChannelResult.closed(_closeCause ?: ClosedSendChannelException(DEFAULT_CLOSE_MESSAGE))
+        _lastElement = element
+        _subscribers.value.forEach { it.trySend(element) }
+        return@withLock ChannelResult.success(Unit)
     }
 
-    @Suppress("UNCHECKED_CAST")
-    private fun offerInternal(element: E): Closed? {
-        // If some other thread is updating the state in its offer operation we assume that our offer had linearized
-        // before that offer (we lost) and that offer overwrote us and conflated our offer.
-        if (!_updating.compareAndSet(0, 1)) return null
-        try {
-            _state.loop { state ->
-                when (state) {
-                    is Closed -> return state
-                    is State<*> -> {
-                        val update = State(element, (state as State<E>).subscribers)
-                        if (_state.compareAndSet(state, update)) {
-                            // Note: Using offerInternal here to ignore the case when this subscriber was
-                            // already concurrently closed (assume the close had conflated our offer for this
-                            // particular subscriber).
-                            state.subscribers?.forEach { it.offerInternal(element) }
-                            return null
-                        }
-                    }
-                    else -> error("Invalid state $state")
-                }
-            }
-        } finally {
-            _updating.value = 0 // reset the updating flag to zero even when something goes wrong
-        }
-    }
-
-    @Suppress("UNCHECKED_CAST")
     public override val onSend: SelectClause2<E, SendChannel<E>>
         get() = SelectClause2Impl(
             clauseObject = this,
@@ -273,24 +166,23 @@ public class ConflatedBroadcastChannel<E>() : BroadcastChannel<E> {
 
     @Suppress("UNCHECKED_CAST")
     private fun registerSelectForSend(select: SelectInstance<*>, element: Any?) {
-        select.selectInRegistrationPhase(offerInternal(element as E))
+        select.selectInRegistrationPhase(trySend(element as E))
     }
 
-    @Suppress("RedundantNullableReturnType", "UNUSED_PARAMETER")
-    private fun processResultSelectSend(ignoredParam: Any?, selectResult: Any?): Any? =
-        if (selectResult is Closed) throw selectResult.sendException
-        else this
-
-    private class Subscriber<E>(
-        private val broadcastChannel: ConflatedBroadcastChannel<E>
-    ) : ConflatedChannel<E>(null), ReceiveChannel<E> {
-
-        override fun onCancelIdempotent(wasClosed: Boolean) {
-            if (wasClosed) {
-                broadcastChannel.closeSubscriber(this)
-            }
+    @Suppress("RedundantNullableReturnType", "UNUSED_PARAMETER", "UNCHECKED_CAST")
+    private fun processResultSelectSend(ignoredParam: Any?, selectResult: Any?): Any? {
+        (selectResult as ChannelResult<Unit>).onClosed {
+            throw it ?: ClosedSendChannelException("Channel has been closed")
         }
+        return this
+    }
 
-        public override fun offerInternal(element: E): Any = super.offerInternal(element)
+    private inner class Subscriber : ConflatedBufferedChannel<E>(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST, onUndeliveredElement = null), ReceiveChannel<E> {
+        override fun onCancel(wasClosed: Boolean) {
+            if (wasClosed) closeSubscriber(this)
+        }
     }
 }
+
+@SharedImmutable
+private val NO_ELEMENT = Symbol("NULL")

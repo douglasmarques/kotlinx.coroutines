@@ -8,6 +8,7 @@ import kotlinx.atomicfu.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.*
 import org.junit.After
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.*
 import org.junit.runners.*
@@ -18,6 +19,7 @@ import kotlin.test.*
  * Tests resource transfer via channel send & receive operations, including their select versions,
  * using `onUndeliveredElement` to detect lost resources and close them properly.
  */
+@Ignore
 @RunWith(Parameterized::class)
 class ChannelUndeliveredElementStressTest(private val kind: TestChannelKind) : TestBase() {
     companion object {
@@ -36,8 +38,8 @@ class ChannelUndeliveredElementStressTest(private val kind: TestChannelKind) : T
     private val scope = CoroutineScope(dispatcher)
 
     private val channel = kind.create<Data> { it.failedToDeliver() }
-    private val senderDone = Channel<Boolean>(1)
-    private val receiverDone = Channel<Boolean>(1)
+    private val senderDone = Channel<Boolean>(Channel.UNLIMITED)
+    private val receiverDone = Channel<Boolean>(Channel.UNLIMITED)
 
     @Volatile
     private var lastReceived = -1L
@@ -116,6 +118,13 @@ class ChannelUndeliveredElementStressTest(private val kind: TestChannelKind) : T
             printErrorDetails()
             throw e
         }
+        val c = channel
+        if (c is BufferedChannel<*>) {
+            assert(c.sendersCounter < (sentCnt + stoppedSender) * 1.2) {
+                "Too many broken cells: $sentCnt elements was sent and $stoppedSender send-s has been stopped, " +
+                    "but sendersCounter equals ${c.sendersCounter}"
+            }
+        }
         sentStatus.clear()
         receivedStatus.clear()
         failedStatus.clear()
@@ -187,10 +196,10 @@ class ChannelUndeliveredElementStressTest(private val kind: TestChannelKind) : T
                     val receiveMode = Random.nextInt(6) + 1
                     val receivedData = when (receiveMode) {
                         1 -> channel.receive()
-                        2 -> select { channel.onReceive { it } }
-                        3 -> channel.receiveCatching().getOrElse { error("Should not be closed") }
-                        4 -> select { channel.onReceiveCatching { it.getOrElse { error("Should not be closed") } } }
-                        5 -> channel.receiveCatching().getOrThrow()
+                        2 -> channel.receiveCatching().getOrElse { error("Should not be closed") }
+                        3 -> channel.receiveCatching().getOrThrow()
+                        4 -> select { channel.onReceive { it } }
+                        5 -> select { channel.onReceiveCatching { it.getOrElse { error("Should not be closed") } } }
                         6 -> {
                             val iterator = channel.iterator()
                             check(iterator.hasNext()) { "Should not be closed" }

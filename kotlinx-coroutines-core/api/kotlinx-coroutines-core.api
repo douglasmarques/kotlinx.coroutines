@@ -51,7 +51,7 @@ public final class kotlinx/coroutines/CancellableContinuation$DefaultImpls {
 	public static synthetic fun tryResume$default (Lkotlinx/coroutines/CancellableContinuation;Ljava/lang/Object;Ljava/lang/Object;ILjava/lang/Object;)Ljava/lang/Object;
 }
 
-public class kotlinx/coroutines/CancellableContinuationImpl : kotlin/coroutines/jvm/internal/CoroutineStackFrame, kotlinx/coroutines/CancellableContinuation {
+public class kotlinx/coroutines/CancellableContinuationImpl : kotlin/coroutines/jvm/internal/CoroutineStackFrame, kotlinx/coroutines/CancellableContinuation, kotlinx/coroutines/channels/Waiter {
 	public fun <init> (Lkotlin/coroutines/Continuation;I)V
 	public final fun callCancelHandler (Lkotlinx/coroutines/CancelHandler;Ljava/lang/Throwable;)V
 	public final fun callOnCancellation (Lkotlin/jvm/functions/Function1;Ljava/lang/Throwable;)V
@@ -855,6 +855,9 @@ public final class kotlinx/coroutines/channels/TickerMode : java/lang/Enum {
 	public static fun values ()[Lkotlinx/coroutines/channels/TickerMode;
 }
 
+public abstract interface class kotlinx/coroutines/channels/Waiter {
+}
+
 public final class kotlinx/coroutines/debug/internal/DebugCoroutineInfo {
 	public fun <init> (Lkotlinx/coroutines/debug/internal/DebugCoroutineInfoImpl;Lkotlin/coroutines/CoroutineContext;)V
 	public final fun getContext ()Lkotlin/coroutines/CoroutineContext;
@@ -1276,7 +1279,7 @@ protected final class kotlinx/coroutines/selects/SelectImplementation$ClauseData
 	public final fun tryRegister (Lkotlinx/coroutines/selects/SelectImplementation;)Z
 }
 
-public abstract interface class kotlinx/coroutines/selects/SelectInstance {
+public abstract interface class kotlinx/coroutines/selects/SelectInstance : kotlinx/coroutines/channels/Waiter {
 	public abstract fun disposeOnCompletion (Lkotlinx/coroutines/DisposableHandle;)V
 	public abstract fun getContext ()Lkotlin/coroutines/CoroutineContext;
 	public abstract fun selectInRegistrationPhase (Ljava/lang/Object;)V

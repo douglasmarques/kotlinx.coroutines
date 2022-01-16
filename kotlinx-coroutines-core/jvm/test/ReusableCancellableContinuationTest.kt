@@ -6,10 +6,12 @@ package kotlinx.coroutines
 
 import kotlinx.coroutines.channels.*
 import kotlinx.coroutines.selects.*
+import org.junit.Ignore
 import org.junit.Test
 import kotlin.coroutines.*
 import kotlin.test.*
 
+@Ignore
 class ReusableCancellableContinuationTest : TestBase() {
     @Test
     fun testReusable() = runTest {
