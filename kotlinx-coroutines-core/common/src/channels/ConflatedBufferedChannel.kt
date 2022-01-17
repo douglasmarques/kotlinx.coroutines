@@ -120,4 +120,21 @@ internal open class ConflatedBufferedChannel<E>(
             }
         }
     }
+
+    override fun close(cause: Throwable?) = lock.withLock {
+        super.close(cause)
+    }
+
+    override fun cancelImpl(cause: Throwable?) = lock.withLock {
+        super.cancelImpl(cause)
+    }
+
+    override val isClosedForSend: Boolean
+        get() = lock.withLock { super.isClosedForSend }
+
+    override val isClosedForReceive: Boolean
+        get() = lock.withLock { super.isClosedForReceive }
+
+    override val isEmpty: Boolean
+        get() = lock.withLock { super.isEmpty }
 }
