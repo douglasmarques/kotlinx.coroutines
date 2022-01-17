@@ -76,9 +76,9 @@ class BlockHoundTest : TestBase() {
     }
 
     @Test
-    fun testConflatedChannelsNotBeingConsideredBlocking() = runTest {
+    fun testUnlimitedChannelNotBeingConsideredBlocking() = runTest {
         withContext(Dispatchers.Default) {
-            val q = Channel<Int>(Channel.CONFLATED)
+            val q = Channel<Int>(Channel.UNLIMITED)
             check(q.isEmpty)
             check(!q.isClosedForReceive)
             check(!q.isClosedForSend)

@@ -95,16 +95,20 @@ internal open class ConflatedBufferedChannel<E>(
     }
 
     override fun trySend(element: E): ChannelResult<Unit> = lock.withLock {
-        if (!shouldSendSuspend()) return super.trySend(element)
-        if (onBufferOverflow === DROP_LATEST) {
-            onUndeliveredElement?.invoke(element)
-        } else { // DROP_OLDEST
-            val oldElement = tryReceiveInternal().getOrThrow()
-            check(!shouldSendSuspend())
-            super.trySend(element)
-            onUndeliveredElement?.invoke(oldElement)
+        while (true) {
+            if (!shouldSendSuspend()) return super.trySend(element)
+            if (onBufferOverflow === DROP_LATEST) {
+                onUndeliveredElement?.invoke(element)
+            } else { // DROP_OLDEST
+                val tryReceiveResult = tryReceiveInternal()
+                if (tryReceiveResult.isFailure) continue
+                check(!shouldSendSuspend())
+                super.trySend(element)
+                onUndeliveredElement?.invoke(tryReceiveResult.getOrThrow())
+            }
+            return success(Unit)
         }
-        return success(Unit)
+        error("unreachable")
     }
 
     override fun registerSelectForSend(select: SelectInstance<*>, element: Any?) {

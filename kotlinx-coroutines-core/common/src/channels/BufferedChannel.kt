@@ -13,6 +13,9 @@ import kotlin.jvm.*
 import kotlin.native.concurrent.*
 import kotlin.reflect.*
 
+/**
+ * TODO huge documentation
+ */
 internal open class BufferedChannel<E>(
     /**
      * Channel capacity, `0` for rendezvous channel
@@ -26,9 +29,19 @@ internal open class BufferedChannel<E>(
         require(capacity >= 0) { "Invalid channel capacity: $capacity, should be >=0" }
     }
 
+    /*
+     * Instead of keeping the capacity, the implementation stores an information on whether
+     * this channel is rendezvous or unlimited. In these cases, the [bufferEnd] and
+     * [bufferEndSegment] are ignored.
+     */
     private val rendezvous = capacity == Channel.RENDEZVOUS
     private val unlimited = capacity == Channel.UNLIMITED
 
+    /*
+     * The counters and the segments for send, receive, and buffer expansion operations.
+     * The counters are incremented in the  beginning of the corresponding operation;
+     * thus, acquiring a unique (for the operation type) cell to process.
+     */
     private val sendersAndCloseStatus = atomic(0L)
     private val receivers = atomic(0L)
     private val bufferEnd = atomic(capacity.toLong())
@@ -149,9 +162,9 @@ internal open class BufferedChannel<E>(
     protected fun shouldSendSuspend(): Boolean {
         val sendersAndCloseStatusCur = sendersAndCloseStatus.value
         val closed = sendersAndCloseStatusCur.isClosedForSend0
-        if (closed) return true
+        if (closed) return false
         val s = sendersAndCloseStatusCur.counter
-        return unlimited || s < bufferEnd.value || s < receivers.value
+        return !(unlimited || s < bufferEnd.value || s < receivers.value)
     }
 
     private inline fun <W, R> sendImpl(
@@ -255,8 +268,7 @@ internal open class BufferedChannel<E>(
                 }
             }
             curState is Waiter -> {
-                // TODO uncomment the line below
-//                segm.setState(i, DONE) // we can safely avoid CAS here
+                segm.setState(i, DONE) // we can safely avoid CAS here
                 return if (curState.tryResumeReceiver(element)) {
                     onReceiveDequeued()
                     RESULT_RENDEZVOUS
