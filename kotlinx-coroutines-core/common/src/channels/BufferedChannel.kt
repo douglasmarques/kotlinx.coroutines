@@ -263,7 +263,10 @@ internal open class BufferedChannel<E>(
                         return RESULT_BUFFERED
                     }
                 } else {
-                    if (waiter == null) return RESULT_NO_WAITER
+                    if (waiter == null) {
+                        segm.setElementLazy(i, null)
+                        return RESULT_NO_WAITER
+                    }
                     if (segm.casState(i, null, waiter)) return RESULT_SUSPEND
                 }
             }
@@ -296,7 +299,10 @@ internal open class BufferedChannel<E>(
                             return RESULT_BUFFERED
                         }
                     } else {
-                        if (waiter === null) return RESULT_NO_WAITER
+                        if (waiter === null) {
+                            segm.setElementLazy(i, null)
+                            return RESULT_NO_WAITER
+                        }
                         if (segm.casState(i, null, waiter)) return RESULT_SUSPEND
                     }
                 }
@@ -837,7 +843,7 @@ internal open class BufferedChannel<E>(
                 select.disposeOnCompletion { segm.onCancellation(i) }
             },
             onClosed = {
-                onReceiveSynchronizationCompletion();
+                onReceiveSynchronizationCompletion()
                 select.selectInRegistrationPhase(CHANNEL_CLOSED)
             }
         )
