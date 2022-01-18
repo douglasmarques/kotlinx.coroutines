@@ -10,7 +10,6 @@ import kotlinx.coroutines.selects.*
 import kotlin.random.*
 import kotlin.test.*
 
-@Ignore
 class ChannelCancelUndeliveredElementStressTest : TestBase() {
     private val repeatTimes = (if (isNative) 1_000 else 10_000) * stressTestMultiplier
 
