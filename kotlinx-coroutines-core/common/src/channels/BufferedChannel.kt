@@ -180,9 +180,10 @@ internal open class BufferedChannel<E>(
      */
     private fun shouldSendSuspend(curSendersAndCloseStatus: Long): Boolean {
         if (curSendersAndCloseStatus.isClosedForSend0) return false
-        val s = curSendersAndCloseStatus.counter
-        return !unlimited && s >= receivers.value && (rendezvous || s >= bufferEnd.value)
+        return !bufferOrRendezvousSend(curSendersAndCloseStatus.counter)
     }
+    private fun bufferOrRendezvousSend(curSenders: Long): Boolean =
+        unlimited || curSenders < receivers.value || (!rendezvous && curSenders < bufferEnd.value)
     /**
      * Checks whether a [send] invocation is bound to suspend if it is called
      * with the current counter and closing status values. See [shouldSendSuspend].
@@ -196,16 +197,32 @@ internal open class BufferedChannel<E>(
     private inline fun <W, R> sendImpl(
         // The element to be sent.
         element: E,
-        // The waiter
+        // The waiter to be stored in case of suspension,
+        // or `null` if the waiter is not created yet.
+        // In the latter case, if the algorithm decides
+        // to suspend, [onNoWaiterSuspend] is called.
         waiter: W,
+        // This lambda is invoked when the element has been
+        // buffered or a rendezvous with receiver happens.
         onRendezvousOrBuffered: () -> R,
+        // This lambda is called when the operation suspends
+        // in the cell specified by the segment and the index in it.
         onSuspend: (segm: ChannelSegment<E>, i: Int) -> R,
+        // This lambda is called when the channel
+        // is observed in the closed state.
         onClosed: () -> R,
+        // This lambda is invoked when the operation decides
+        // to suspend, but the waiter is not provided. It should
+        // create a waiter and delegate to `sendImplOnNoWaiter`.
         onNoWaiterSuspend: (segm: ChannelSegment<E>, i: Int, element: E, s: Long) -> R
                     = { _, _, _, _ -> error("unreachable code") }
     ): R {
+        // Read the segment index first,
+        // before the counter increment.
         var segm = sendSegment.value
         while (true) {
+            // Atomically increment `senders` counter and obtain the
+            // value before the increment and the close status.
             val sendersAndCloseStatusCur = sendersAndCloseStatus.getAndIncrement()
             val closed = sendersAndCloseStatusCur.isClosedForSend0
 
@@ -285,25 +302,26 @@ internal open class BufferedChannel<E>(
         when {
             curState === null -> {
                 segm.storeElement(i, element)
-                val rendezvous = unlimited || s < bufferEnd.value || s < receivers.value
+                val rendezvous = bufferOrRendezvousSend(s)
                 if (rendezvous) {
                     if (segm.casState(i, null, BUFFERED)) {
                         return RESULT_BUFFERED
                     }
                 } else {
                     if (waiter == null) {
-                        segm.setElementLazy(i, null)
+                        segm.cleanElement(i)
                         return RESULT_NO_WAITER
                     }
                     if (segm.casState(i, null, waiter)) return RESULT_SUSPEND
                 }
             }
             curState is Waiter -> {
-                segm.setState(i, DONE) // we can safely avoid CAS here
-                return if (curState.tryResumeReceiver(element)) {
-                    onReceiveDequeued()
-                    RESULT_RENDEZVOUS
-                } else RESULT_FAILED
+                if (segm.casState(i, curState, DONE)) {
+                    return if (curState.tryResumeReceiver(element)) {
+                        onReceiveDequeued()
+                        RESULT_RENDEZVOUS
+                    } else RESULT_FAILED
+                }
             }
         }
         return updateCellSendSlow(segm, i, element, s, waiter)
@@ -318,44 +336,72 @@ internal open class BufferedChannel<E>(
      */
     private fun <W> updateCellSendSlow(
         segment: ChannelSegment<E>,
-        i: Int,
+        index: Int,
         element: E,
         s: Long,
         waiter: W,
     ): Int {
-        segment.storeElement(i, element)
+        // First, the algorithm stores the element.
+        segment.storeElement(index, element)
+        // The, the cell state should be updated
+        // according to the state machine.
         while (true) {
-            val state = segment.getState(i)
+            // Read the current state.
+            val state = segment.getState(index)
             when {
+                // The cell is empty.
                 state === null -> {
-                    val rendezvous = unlimited || s < bufferEnd.value || s < receivers.value
-                    if (rendezvous) {
-                        if (segment.casState(i, null, BUFFERED)) {
+                    // If the element should be buffered, ar a rendezvous should happen
+                    // but the receiver is still coming, try to buffer the element.
+                    // Otherwise, try to store the specified waiter in the cell.
+                    if (bufferOrRendezvousSend(s)) {
+                        // Move the cell state to BUFFERED.
+                        if (segment.casState(index, null, BUFFERED)) {
+                            // The element has been successfully buffered, finish.
                             return RESULT_BUFFERED
                         }
                     } else {
+                        // This send operation should suspend.
                         if (waiter === null) {
-                            segment.setElementLazy(i, null)
+                            // The waiter is not specified; clean the element
+                            // slot and return the corresponding result.
+                            segment.cleanElement(index)
                             return RESULT_NO_WAITER
                         }
-                        if (segment.casState(i, null, waiter)) return RESULT_SUSPEND
+                        // Try to install the waiter.
+                        if (segment.casState(index, null, waiter)) return RESULT_SUSPEND
                     }
                 }
+                // The buffer has been expanded and this cell
+                // is covered by the buffer. Therefore, the algorithm
+                // tries to buffer the element.
                 state === BUFFERING -> {
-                    if (segment.casState(i, state, BUFFERED)) return RESULT_RENDEZVOUS
+                    // Move the state to BUFFERED.
+                    if (segment.casState(index, state, BUFFERED)) return RESULT_RENDEZVOUS
                 }
+                // Fail if the cell is broken by a concurrent receiver,
+                // or the receiver stored in this cell was interrupted.
+                // or the channel is closed.
                 state === BROKEN || state === INTERRUPTED || state === INTERRUPTED_EB || state === INTERRUPTED_R || state === CHANNEL_CLOSED -> {
-                    segment.setElementLazy(i, null)
+                    // Clean the element slot to avoid memory leaks.
+                    segment.cleanElement(index)
                     return RESULT_FAILED
                 }
+                // A waiting receiver is stored in the cell.
                 else -> {
-                    segment.setState(i, DONE) // we can safely avoid CAS here
-                    segment.setElementLazy(i, null)
-                    val receiver = if (state is WaiterEB) state.waiter else state
-                    return if (receiver.tryResumeReceiver(element)) {
-                        onReceiveDequeued()
-                        RESULT_RENDEZVOUS
-                    } else RESULT_FAILED
+                    // Try to move the cell state to DONE.
+                    if (segment.casState(index, state, DONE)) {
+                        // As the element passes directly to the waiter,
+                        // we should clean the corresponding slot.
+                        segment.cleanElement(index)
+                        // Unwrap the waiting receiver from `WaiterEB` if needed.
+                        val receiver = if (state is WaiterEB) state.waiter else state
+                        // Try to make a rendezvous with the receiver.
+                        return if (receiver.tryResumeReceiver(element)) {
+                            onReceiveDequeued()
+                            RESULT_RENDEZVOUS
+                        } else RESULT_FAILED
+                    }
                 }
             }
         }
@@ -1416,7 +1462,7 @@ internal open class BufferedChannel<E>(
         while (true) {
             repeat(SEGMENT_SIZE) { i ->
                 val w = cur.getState(i)
-                val e = cur.getElement(i)
+                val e = cur.readElement(i)
                 val wString = when (w) {
                     is CancellableContinuation<*> -> "cont"
                     is SelectInstance<*> -> "select"
@@ -1451,8 +1497,8 @@ internal class ChannelSegment<E>(id: Long, prev: ChannelSegment<E>?, pointers: I
 
     override val maxSlots: Int get() = SEGMENT_SIZE
 
-    inline fun getElement(index: Int): Any? = data[index * 2].value
-    inline fun setElementLazy(index: Int, value: Any?) {
+    private inline fun getElement(index: Int): Any? = data[index * 2].value
+    private inline fun setElementLazy(index: Int, value: Any?) {
         data[index * 2].lazySet(value)
     }
 
@@ -1473,9 +1519,13 @@ internal class ChannelSegment<E>(id: Long, prev: ChannelSegment<E>?, pointers: I
 
     fun retrieveElement(i: Int): E = readElement(i).also { setElementLazy(i, null) }
 
-    private fun readElement(i: Int): E {
+    fun readElement(i: Int): E {
         val element = getElement(i)
         return (if (element === NULL_ELEMENT) null else element) as E
+    }
+
+    fun cleanElement(i: Int) {
+        setElementLazy(i, null)
     }
 
     fun onCancellation(i: Int, onUndeliveredElement: OnUndeliveredElement<E>? = null, context: CoroutineContext? = null, expectedWaiter: Any? = null) {
