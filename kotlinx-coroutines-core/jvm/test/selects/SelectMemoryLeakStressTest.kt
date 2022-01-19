@@ -9,7 +9,7 @@ import kotlinx.coroutines.channels.*
 import kotlin.test.*
 
 class SelectMemoryLeakStressTest : TestBase() {
-    private val nRepeat = 1_000_000 * stressTestMultiplier
+    private val nRepeat = 1_000_000 * 25// stressTestMultiplier
 
     @Test
     fun testLeakRegisterSend() = runTest {
