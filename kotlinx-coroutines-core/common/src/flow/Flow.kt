@@ -108,7 +108,7 @@ import kotlin.coroutines.*
  * val myFlow = flow {
  *    // GlobalScope.launch { // is prohibited
  *    // launch(Dispatchers.IO) { // is prohibited
- *    // withContext(CoroutineName("myFlow")) // is prohibited
+ *    // withContext(CoroutineName("myFlow")) { // is prohibited
  *    emit(1) // OK
  *    coroutineScope {
  *        emit(2) // OK -- still the same coroutine
@@ -184,13 +184,16 @@ public interface Flow<out T> {
      *
      * This method can be used along with SAM-conversion of [FlowCollector]:
      * ```
-     * myFlow.collect { value -> println("Collected $value")
+     * myFlow.collect { value -> println("Collected $value") }
      * ```
      *
      * ### Method inheritance
      *
      * To ensure the context preservation property, it is not recommended implementing this method directly.
      * Instead, [AbstractFlow] can be used as the base type to properly ensure flow's properties.
+     *
+     * All default flow implementations ensure context preservation and exception transparency properties on a best-effort basis
+     * and throw [IllegalStateException] if a violation was detected.
      */
     public suspend fun collect(collector: FlowCollector<T>)
 }
