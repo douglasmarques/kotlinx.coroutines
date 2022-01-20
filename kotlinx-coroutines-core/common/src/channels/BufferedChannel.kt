@@ -10,6 +10,7 @@ import kotlinx.coroutines.selects.*
 import kotlinx.coroutines.selects.TrySelectDetailedResult.*
 import kotlin.coroutines.*
 import kotlin.jvm.*
+import kotlin.math.*
 import kotlin.native.concurrent.*
 import kotlin.random.*
 import kotlin.reflect.*
@@ -803,8 +804,11 @@ internal open class BufferedChannel<E>(
         try_again@ while (true) {
             val b = bufferEnd.getAndIncrement()
             val s = sendersAndCloseStatus.value.counter
-            if (s <= b) return
             val id = b / SEGMENT_SIZE
+            if (s <= b) {
+                findSegmentBuffer(id, segm) // to avoid memory leaks
+                return
+            }
             val i = (b % SEGMENT_SIZE).toInt()
             if (segm.id != id) {
                 segm = findSegmentBuffer(id, segm).let {
@@ -1520,7 +1524,8 @@ internal open class BufferedChannel<E>(
         }
         while (data.isNotEmpty() && data.last() == "(null,null)") data.removeLast()
         return "S=${sendersAndCloseStatus.value.counter},R=${receivers.value},B=${bufferEnd.value}," +
-               "C=${sendersAndCloseStatus.value.closeStatus},data=${data},dataStartIndex=$dataStartIndex"
+               "C=${sendersAndCloseStatus.value.closeStatus},data=${data},dataStartIndex=$dataStartIndex," +
+               "S_SegmId=${sendSegment.value.id},R_SegmId=${receiveSegment.value.id},B_SegmId=${bufferEndSegment.value?.id}"
     }
 }
 

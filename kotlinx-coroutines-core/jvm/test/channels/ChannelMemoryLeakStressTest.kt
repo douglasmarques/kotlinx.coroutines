@@ -13,10 +13,10 @@ class ChannelMemoryLeakStressTest : TestBase()  {
 
     @Test
     fun test() = runTest {
-        val data = Channel<Int>(1)
+        val c = Channel<Int>(1)
         repeat(nRepeat) { value ->
-            data.send(value)
-            data.receive()
+            c.send(value)
+            c.receive()
         }
     }
 
